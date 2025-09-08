@@ -1,0 +1,42 @@
+2025-03-01 11:23:02,032 - INFO - Using GPU: NVIDIA GeForce RTX 4090
+2025-03-01 11:23:02,032 - INFO - GPU Memory: 23.99 GB
+2025-03-01 11:23:02,032 - INFO - CUDA Version: 12.6
+2025-03-01 11:23:02,032 - INFO - Current GPU Memory Usage - Allocated: 0.00 GB, Cached: 0.00 GB
+2025-03-01 11:23:02,032 - INFO - Starting noise experiment...
+2025-03-01 11:23:02,047 - INFO - Starting dataset generation...
+2025-03-01 11:23:02,050 - INFO - Using 31 CPU cores for parallel processing
+2025-03-01 11:23:53,075 - INFO - Dataset generation completed.
+2025-03-01 11:23:53,076 - INFO - Training models for noise levels: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+2025-03-01 16:46:24,316 - INFO - Starting model evaluation...
+2025-03-02 14:15:58,297 - INFO - Using GPU: NVIDIA GeForce RTX 4090
+2025-03-02 14:15:58,297 - INFO - GPU Memory: 23.99 GB
+2025-03-02 14:15:58,297 - INFO - CUDA Version: 12.6
+2025-03-02 14:15:58,297 - INFO - Current GPU Memory Usage - Allocated: 0.00 GB, Cached: 0.00 GB
+2025-03-02 14:15:58,297 - INFO - Starting noise experiment...
+2025-03-02 14:15:58,298 - INFO - Starting dataset generation...
+2025-03-02 14:15:58,301 - INFO - Using 31 CPU cores for parallel processing
+2025-03-02 14:16:40,985 - INFO - Dataset generation completed.
+2025-03-02 14:16:40,986 - INFO - Training models for noise levels: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+2025-03-03 16:01:28,711 - INFO - Starting model evaluation...
+2025-03-04 11:42:27,883 - INFO - Evaluation completed:
+2025-03-04 11:42:27,883 - INFO -   - Processed: 400
+2025-03-04 11:42:27,884 - INFO -   - Skipped: 0
+2025-03-04 11:42:27,884 - INFO -   - Total results: 400
+2025-03-04 11:42:27,884 - INFO - Results saved to noise_experiment/evaluation_results.csv
+2025-03-04 11:42:27,885 - INFO - Experiment completed in 1 day, 21:26:29.587113
+2025-03-09 16:05:50,581 - INFO - Using GPU: NVIDIA GeForce RTX 4090
+2025-03-09 16:05:50,581 - INFO - GPU Memory: 23.99 GB
+2025-03-09 16:05:50,581 - INFO - CUDA Version: 12.6
+2025-03-09 16:05:50,581 - INFO - Current GPU Memory Usage - Allocated: 0.00 GB, Cached: 0.00 GB
+2025-03-09 16:05:50,581 - INFO - Starting noise experiment...
+2025-03-09 16:05:50,581 - INFO - Starting dataset generation...
+2025-03-09 16:05:50,595 - INFO - Using 31 CPU cores for parallel processing
+2025-03-09 16:06:33,594 - INFO - Dataset generation completed.
+2025-03-09 16:06:33,599 - INFO - Training models for noise levels: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95]
+2025-03-10 08:34:14,790 - INFO - Starting model evaluation...
+2025-03-10 10:43:28,942 - INFO - Evaluation completed:
+2025-03-10 10:43:28,942 - INFO -   - Processed: 400
+2025-03-10 10:43:28,942 - INFO -   - Skipped: 0
+2025-03-10 10:43:28,942 - INFO -   - Total results: 400
+2025-03-10 10:43:28,942 - INFO - Results saved to noise_experiment/evaluation_results.csv
+2025-03-10 10:43:28,942 - INFO - Experiment completed in 18:37:38.360975
