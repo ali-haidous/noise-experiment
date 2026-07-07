@@ -1,2 +1,8 @@
-﻿venv
-noise_experiment
+.venv
+venv
+__pycache__
+datasets
+noise_experiment_coco
+noise_experiment_coco8
+noise_experiment_coco128
+noise_experiment_coco_smoke

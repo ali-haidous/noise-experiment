@@ -41,9 +41,11 @@ import gc
 import logging
 import os
 import platform
+import shutil
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 try:
     import resource  # Unix-only; optional RSS fallback when psutil is unavailable
@@ -245,6 +247,67 @@ def model_footprint(yolo_model, weights_path, imgsz):
     return fp
 
 
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+
+def _redirect_datasets_dir(path):
+    """Point Ultralytics' download dir at `path` (in-memory only, not persisted)."""
+    import ultralytics.utils as _uu
+    import ultralytics.data.utils as _du
+    p = os.path.abspath(path)
+    os.makedirs(p, exist_ok=True)
+    _uu.DATASETS_DIR = Path(p)
+    _du.DATASETS_DIR = Path(p)
+    return p
+
+
+def _add_noise_to_file(src, dst, percentage, seed):
+    """Write a noisy copy of `src` to `dst`: replace `percentage`% of pixel positions
+    (across all channels) with uniform random values. percentage<=0 -> plain copy."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if percentage <= 0:
+        shutil.copyfile(src, dst)
+        return
+    import cv2
+    img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+    if img is None:
+        shutil.copyfile(src, dst)
+        return
+    rng = np.random.default_rng(seed)
+    h, w = img.shape[:2]
+    mask = rng.random((h, w)) < (percentage / 100.0)
+    noise = rng.integers(0, 256, img.shape, dtype=np.uint8)
+    if img.ndim == 3:
+        mask = np.repeat(mask[:, :, None], img.shape[2], axis=2)
+    cv2.imwrite(str(dst), np.where(mask, noise, img))
+
+
+def _enumerate_images(entry, root):
+    """Resolve a dataset 'train'/'val' entry (dir, .txt list, or list) to image paths."""
+    root = Path(root)
+    out = []
+    for e in (entry if isinstance(entry, list) else [entry]):
+        p = Path(e)
+        if p.is_dir():
+            out += [str(x) for x in p.rglob("*") if x.suffix.lower() in IMG_EXTS]
+        elif p.suffix.lower() == ".txt" and p.is_file():
+            for line in p.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    q = Path(line)
+                    out.append(str(q if q.is_absolute() else (root / line).resolve()))
+        elif p.suffix.lower() in IMG_EXTS:
+            out.append(str(p))
+    return sorted(set(out))
+
+
+def _rel_under_images(img_path):
+    """Path fragment after the last 'images' component (e.g. train2017/x.jpg)."""
+    parts = Path(img_path).parts
+    idxs = [i for i, seg in enumerate(parts) if seg == "images"]
+    return Path(*parts[idxs[-1] + 1:]) if idxs else Path(Path(img_path).name)
+
+
 # ----------------------------------------------------------------------------
 # Experiment driver
 # ----------------------------------------------------------------------------
@@ -274,6 +337,11 @@ class NoiseExperimentCOCO:
         self.output_dir = args.output_dir
         self.seed = args.seed
         self.cross_eval = args.cross_eval
+        self.data_root = os.path.abspath(args.data_root)
+        self.dataset_name = Path(self.data).stem
+        self.use_noisy_data = args.use_noisy_data
+        self.prepare_data = args.prepare_data
+        self.force_regenerate = args.force_regenerate
         os.makedirs(self.output_dir, exist_ok=True)
 
         logging.basicConfig(
@@ -321,10 +389,10 @@ class NoiseExperimentCOCO:
             return False
         return False
 
-    def _train_args(self, size, noise_level):
+    def _train_args(self, size, noise_level, data):
         run_name = f"yolo26{size}_noise_{noise_level}"
         ta = {
-            "data": self.data,
+            "data": data,
             "epochs": self.epochs,
             "imgsz": self.image_size,
             "batch": self.batch_size,
@@ -348,6 +416,55 @@ class NoiseExperimentCOCO:
             ta.update({"amp": True, "workers": self.args.workers})
         return ta, run_name
 
+    def _noisy_root(self):
+        return os.path.join(self.data_root, f"{self.dataset_name}_noisy")
+
+    def _noisy_level_yaml(self, level):
+        return os.path.join(self._noisy_root(), f"noise_{level}", "dataset.yaml")
+
+    def prepare_datasets(self):
+        """Download the chosen dataset into <data_root>/<name> and build on-disk noisy
+        copies into <data_root>/<name>_noisy/noise_<level>/ for each noise level."""
+        import yaml
+        from ultralytics.data.utils import check_det_dataset, img2label_paths
+        root = _redirect_datasets_dir(self.data_root)
+        logging.info(f"Datasets directory -> {root}")
+        if self.dataset_name == "coco" and len(self.noise_levels) > 2:
+            logging.warning(f"Building {len(self.noise_levels)} noisy copies of full COCO "
+                            f"(~118k images each) needs a lot of disk; consider coco128/coco8.")
+        logging.info(f"Resolving/downloading clean dataset '{self.data}' ...")
+        data = check_det_dataset(self.data)
+        names, droot = data.get("names"), data.get("path")
+        train_imgs = _enumerate_images(data.get("train"), droot)
+        val_imgs = _enumerate_images(data.get("val"), droot)
+        logging.info(f"Clean dataset ready: {len(train_imgs)} train / {len(val_imgs)} val at {droot}")
+
+        for level in self.noise_levels:
+            lvl_dir = os.path.join(self._noisy_root(), f"noise_{level}")
+            yaml_path = os.path.join(lvl_dir, "dataset.yaml")
+            if os.path.exists(yaml_path) and not self.force_regenerate:
+                logging.info(f"noise {level}% already prepared -> skipping ({lvl_dir})")
+                continue
+            logging.info(f"Building noisy dataset: noise={level}% -> {lvl_dir}")
+            os.makedirs(lvl_dir, exist_ok=True)
+            for split, imgs in (("train", train_imgs), ("val", val_imgs)):
+                listing = []
+                for img, src_lbl in zip(imgs, img2label_paths(imgs)):
+                    rel = str(_rel_under_images(img))
+                    dst_img = os.path.join(lvl_dir, "images", rel)
+                    _add_noise_to_file(img, dst_img, level, seed=self.seed + level)
+                    if os.path.exists(src_lbl):
+                        dst_lbl = os.path.join(lvl_dir, "labels", os.path.splitext(rel)[0] + ".txt")
+                        os.makedirs(os.path.dirname(dst_lbl), exist_ok=True)
+                        shutil.copyfile(src_lbl, dst_lbl)
+                    listing.append(os.path.abspath(dst_img))
+                with open(os.path.join(lvl_dir, f"{split}.txt"), "w") as fh:
+                    fh.write("\n".join(listing))
+            with open(yaml_path, "w") as fh:
+                yaml.safe_dump({"path": os.path.abspath(lvl_dir), "train": "train.txt",
+                                "val": "val.txt", "names": names}, fh, sort_keys=False)
+        logging.info(f"Noisy datasets ready under {self._noisy_root()}")
+
     def train_all(self):
         from ultralytics import YOLO
 
@@ -364,13 +481,18 @@ class NoiseExperimentCOCO:
                     continue
                 logging.info(f"=== {banner} ===")
 
-                # Configure noise for this run BEFORE building the trainer.
-                NOISE.configure(noise_level, seed=self.seed + noise_level, device=self.device)
+                # Select the dataset for this noise level.
+                if self.use_noisy_data:
+                    data_yaml = self._noisy_level_yaml(noise_level)   # pre-built on disk
+                else:
+                    data_yaml = self.data
+                    # Configure on-the-fly noise BEFORE building the trainer.
+                    NOISE.configure(noise_level, seed=self.seed + noise_level, device=self.device)
 
                 try:
                     model = YOLO(weights)   # auto-downloads the weight file on first use
                     fp = model_footprint(model, self._weights_file(weights), self.image_size)
-                    train_args, run_name = self._train_args(size, noise_level)
+                    train_args, run_name = self._train_args(size, noise_level, data_yaml)
 
                     with MemoryMonitor(self.device, self.args.mem_interval) as mem:
                         results = model.train(**train_args)
@@ -418,11 +540,15 @@ class NoiseExperimentCOCO:
                     if self._already_done(self.eval_csv, ["model", "model_noise", "val_noise"],
                                           [f"yolo26{size}", model_noise, val_noise]):
                         continue
-                    NOISE.configure(val_noise, seed=self.seed + val_noise, device=self.device)
+                    if self.use_noisy_data:
+                        val_data = self._noisy_level_yaml(val_noise)
+                    else:
+                        val_data = self.data
+                        NOISE.configure(val_noise, seed=self.seed + val_noise, device=self.device)
                     try:
                         model = YOLO(best_pt)
                         with MemoryMonitor(self.device, self.args.mem_interval) as mem:
-                            res = model.val(data=self.data,
+                            res = model.val(data=val_data,
                                             device=0 if self.device.type == "cuda" else "cpu",
                                             name=f"{run_name}_val_{val_noise}",
                                             project=os.path.join(self.output_dir, "runs"),
@@ -463,7 +589,14 @@ class NoiseExperimentCOCO:
         start = datetime.now()
         logging.info(f"Noise x YOLO26 x COCO experiment start: sizes={self.sizes}, "
                      f"noise={self.noise_levels}, data={self.data}, epochs={self.epochs}")
-        install_noise_hooks()
+        _redirect_datasets_dir(self.data_root)   # keep all downloads inside the repo
+        if self.prepare_data or self.use_noisy_data:
+            self.prepare_datasets()
+        if self.prepare_data:
+            logging.info("Data preparation complete (--prepare-data); exiting before training.")
+            return
+        if not self.use_noisy_data:
+            install_noise_hooks()   # on-the-fly noise (default)
         self.train_all()
         if self.cross_eval:
             self.cross_evaluate()
@@ -480,6 +613,17 @@ def parse_args():
     p.add_argument("--data", type=str, default=None,
                    help="Raw Ultralytics dataset yaml override. If omitted it is "
                         "derived from --dataset (e.g. coco128 -> coco128.yaml).")
+    p.add_argument("--data-root", type=str, default="datasets",
+                   help="Directory at the repo root holding BOTH the downloaded dataset and "
+                        "the on-disk noisy copies.")
+    p.add_argument("--prepare-data", action="store_true",
+                   help="Download the chosen dataset and build on-disk noisy copies for every "
+                        "noise level under --data-root, then exit (no training).")
+    p.add_argument("--use-noisy-data", action="store_true",
+                   help="Train/evaluate on the pre-built on-disk noisy datasets instead of "
+                        "injecting noise on the fly (auto-builds them first if missing).")
+    p.add_argument("--force-regenerate", action="store_true",
+                   help="Rebuild on-disk noisy datasets even if they already exist.")
     p.add_argument("--models", nargs="+", default=YOLO26_SIZES, choices=YOLO26_SIZES,
                    help="YOLO26 scales to run (default: all five).")
     p.add_argument("--image-size", type=int, default=640)

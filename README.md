@@ -62,6 +62,37 @@ the entire experiment shape (all sizes × all noise levels + memory capture) in 
 before committing to full COCO. `--data <yaml>` remains a raw override that wins over
 `--dataset` if you want a custom dataset yaml.
 
+### On-disk noisy datasets
+
+By default the noise is injected **on the fly** during training and nothing extra is
+written to disk. If you'd rather materialize the corrupted images — to inspect them, or to
+train on a fixed noisy set — build them once and train on them:
+
+```bash
+./run.sh prepare                 # download + build noisy copies for coco128, then exit
+DATASET=coco8 ./run.sh prepare   # ...or coco8 / coco
+NOISY=1 ./run.sh coco128         # train on the pre-built on-disk noisy datasets
+```
+
+Both the clean dataset and its noisy copies are written under `./datasets/` (override with
+`--data-root`):
+
+```
+datasets/
+  coco128/                      # clean dataset (auto-downloaded here)
+  coco128_noisy/
+    noise_0/   { images/  labels/  train.txt  val.txt  dataset.yaml }
+    noise_5/   ...
+    ...
+```
+
+Each `noise_<level>/` is a self-contained YOLO dataset — a fixed, reproducible corruption
+of the clean images (labels copied unchanged), so runs are repeatable and the images are
+inspectable. Direct flags: `--prepare-data` (build then exit), `--use-noisy-data`
+(train/eval on the on-disk copies, auto-building if missing), `--force-regenerate`
+(rebuild), `--data-root DIR`. Materializing all 20 levels of **full COCO** is ~360 GB, so
+prefer coco8/coco128 for the on-disk path, or fewer noise levels.
+
 **The COCO download (~20 GB) is handled by Ultralytics** on first training run — it
 lands in the Ultralytics `datasets/` directory (see `yolo settings` for the path).
 No manual download needed; if COCO is already present it is reused. The `coco8` and
@@ -92,6 +123,8 @@ If you specifically need the *frozen-on-disk* variant for a subset of levels, sa
 it can be added as an offline pre-pass.
 
 ---
+
+This on-the-fly path is the default. You can also materialize the noisy images on disk and train on them instead — see **On-disk noisy datasets** above.
 
 ## Memory footprint outputs
 
