@@ -1,4 +1,7 @@
 #!/bin/bash
+# Create the virtual environment for the YOLO26 x COCO noise experiment.
+#   Usage:  source create_venv.sh    (source it so the venv stays active in your shell)
+set -e
 
 # Bootstrap uv if not already installed
 if ! command -v uv &> /dev/null; then
@@ -7,14 +10,17 @@ if ! command -v uv &> /dev/null; then
     export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-# Create virtual environment with Python 3.11 using uv
+# Create + activate the virtual environment (Python 3.11)
 uv venv --python 3.11
+source .venv/Scripts/activate     # Windows; on Linux/mac use: source .venv/bin/activate
 
-# Activate the virtual environment (Windows path)
-source .venv/Scripts/activate
+# 1) Install the CUDA 12.6 build of PyTorch FIRST, so the next step does not pull
+#    the CPU-only default wheel that ultralytics would otherwise resolve.
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 
-# Install requirements using uv (much faster than pip)
+# 2) Install the rest of the dependencies.
 uv pip install -r requirements.txt
 
-# Install PyTorch with CUDA 12.6 support using uv
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+echo ""
+echo "Done. Verify CUDA is available with:"
+echo "    python -c \"import torch; print('cuda:', torch.cuda.is_available())\""
