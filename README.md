@@ -15,12 +15,14 @@ Main script: `noise_experiment.py`.
 
 ## Install
 
-The RTX 4090 needs a CUDA build of PyTorch (same as the original setup, CUDA 12.6):
+The RTX 4090/5090 needs a CUDA build of PyTorch (same as the original setup, CUDA 13.2):
 
+First, install CUDA 13.2: https://developer.download.nvidia.com/compute/cuda/13.2.0/local_installers/cuda_13.2.0_windows.exe
+Then, run:
 ```bash
-python -m venv .venv && source .venv/Scripts/activate     # (.venv/bin/activate on Linux/mac)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-pip install -r requirements.txt
+chmod +x ./create_env.sh
+./create_env.sh
+source .venv/Scripts/activate     # (.venv/bin/activate on Linux/mac)
 ```
 
 `ultralytics>=8.4.90` is required — that is the first series shipping YOLO26.
@@ -93,6 +95,42 @@ inspectable. Direct flags: `--prepare-data` (build then exit), `--use-noisy-data
 (rebuild), `--data-root DIR`. Materializing all 20 levels of **full COCO** is ~360 GB, so
 prefer coco8/coco128 for the on-disk path, or fewer noise levels.
 
+### Cross-noise validation matrix
+
+Training produces one model per (scale, training noise level). The cross-evaluation step then
+validates each of those models across a full validation noise sweep, so you can see how a model
+trained at one noise level holds up when tested at every other level. The matrix has
+`sizes x train_levels x val_levels` cells (for the default sweep that is 5 x 20 x 20 = 2000
+validations).
+
+```bash
+./run.sh full-xeval                    # matrix right after training (or add --cross-eval)
+MODELS_DIR=path/to/models ./run.sh eval # ONLY the matrix, on weights you already trained
+```
+
+The validation sweep is configured independently of the training levels:
+
+- `--val-min-noise`, `--val-max-noise`, `--val-noise-step`, or `--val-noise-list` set the levels
+  each model is validated on. If you omit them, the validation sweep matches the training levels.
+- `--cross-eval` runs the matrix after training; `--eval-only` runs just the matrix on existing
+  weights (and implies `--cross-eval`).
+- `--models-dir DIR` points evaluation at the trained weights
+  (`DIR/<name>_noise_<level>/weights/best.pt`), defaulting to `<output-dir>/models`. Ultralytics
+  can save runs under its own `runs` folder, so if `eval` reports missing weights, set
+  `--models-dir` (or `MODELS_DIR`) to the path shown next to "Results saved to" in the training log.
+
+Results go to `evaluation_results.csv`, one row per cell: `model, size, model_noise, val_noise,
+mAP50, mAP50_95, precision, recall`, the validation speed per image (`preprocess_ms_per_img`,
+`inference_ms_per_img`, `postprocess_ms_per_img`), and peak GPU and host memory. The speed columns
+are the per-image latency Ultralytics reports at that noise level, so each cell shows both how
+accuracy and how inference cost respond as the validation noise changes.
+Re-running resumes and skips cells already recorded.
+
+```bash
+# validate every trained model on the full 0 to 95 sweep, step 5
+python noise_experiment.py --dataset coco128 --eval-only --cross-eval     --min-noise 0 --max-noise 95 --noise-step 5     --val-min-noise 0 --val-max-noise 95 --val-noise-step 5     --models-dir noise_experiment_coco128/models --output-dir noise_experiment_coco128
+```
+
 **The COCO download (~20 GB) is handled by Ultralytics** on first training run — it
 lands in the Ultralytics `datasets/` directory (see `yolo settings` for the path).
 No manual download needed; if COCO is already present it is reused. The `coco8` and
@@ -135,8 +173,9 @@ Everything is written under `--output-dir` (default `noise_experiment_coco/`):
   weights_mb, wall_time_s, peak_gpu_alloc_gb, peak_gpu_reserved_gb, peak_cpu_rss_gb,
   map50, map50_95, precision, recall, error`
 - **`training_results.csv`** — compact accuracy table (mAP/precision/recall per run).
-- **`evaluation_results.csv`** — only with `--cross-eval`: per (model_noise, val_noise)
-  mAP plus `inference_ms_per_img` and peak memory.
+- **`evaluation_results.csv`** — only with `--cross-eval`: per (model_noise, val_noise) mAP, the
+  validation speed per image (`preprocess_ms_per_img`, `inference_ms_per_img`,
+  `postprocess_ms_per_img`), and peak memory.
 - **`noise_experiment_coco.log`** — full run log (device banner, per-run summary).
 - **`models/yolo26<size>_noise_<level>/`** — standard Ultralytics run dir (weights, plots).
 

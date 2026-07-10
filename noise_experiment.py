@@ -320,8 +320,8 @@ class NoiseExperimentCOCO:
                         "wall_time_s", "peak_gpu_alloc_gb", "peak_gpu_reserved_gb",
                         "peak_cpu_rss_gb", "map50", "map50_95", "precision", "recall", "error"]
     EVAL_FIELDS = ["model", "size", "model_noise", "val_noise", "map50", "map50_95",
-                   "precision", "recall", "inference_ms_per_img",
-                   "peak_gpu_alloc_gb", "peak_cpu_rss_gb"]
+                   "precision", "recall", "preprocess_ms_per_img", "inference_ms_per_img",
+                   "postprocess_ms_per_img", "peak_gpu_alloc_gb", "peak_cpu_rss_gb"]
 
     def __init__(self, args):
         self.args = args
@@ -342,6 +342,18 @@ class NoiseExperimentCOCO:
         self.use_noisy_data = args.use_noisy_data
         self.prepare_data = args.prepare_data
         self.force_regenerate = args.force_regenerate
+        self.eval_only = args.eval_only
+        self.models_dir = (os.path.abspath(args.models_dir) if args.models_dir
+                           else os.path.join(os.path.abspath(self.output_dir), "models"))
+        if getattr(args, "val_noise_list", None):
+            self.val_noise_levels = args.val_noise_list
+        elif any(getattr(args, k) is not None for k in ("val_min_noise", "val_max_noise", "val_noise_step")):
+            vmin = args.val_min_noise if args.val_min_noise is not None else 0
+            vmax = args.val_max_noise if args.val_max_noise is not None else 95
+            vstep = args.val_noise_step if args.val_noise_step is not None else 5
+            self.val_noise_levels = list(range(vmin, vmax + vstep, vstep))
+        else:
+            self.val_noise_levels = list(self.noise_levels)
         os.makedirs(self.output_dir, exist_ok=True)
 
         logging.basicConfig(
@@ -398,7 +410,7 @@ class NoiseExperimentCOCO:
             "batch": self.batch_size,
             "device": 0 if self.device.type == "cuda" else "cpu",
             "name": run_name,
-            "project": os.path.join(self.output_dir, "models"),
+            "project": self.models_dir,
             "patience": self.args.patience,
             "optimizer": "auto",
             "verbose": True,
@@ -439,7 +451,7 @@ class NoiseExperimentCOCO:
         val_imgs = _enumerate_images(data.get("val"), droot)
         logging.info(f"Clean dataset ready: {len(train_imgs)} train / {len(val_imgs)} val at {droot}")
 
-        for level in self.noise_levels:
+        for level in sorted(set(self.noise_levels) | set(self.val_noise_levels)):
             lvl_dir = os.path.join(self._noisy_root(), f"noise_{level}")
             yaml_path = os.path.join(lvl_dir, "dataset.yaml")
             if os.path.exists(yaml_path) and not self.force_regenerate:
@@ -498,7 +510,7 @@ class NoiseExperimentCOCO:
                         results = model.train(**train_args)
 
                     metrics = self._extract_metrics(results)
-                    best_pt = os.path.join(self.output_dir, "models", run_name, "weights", "best.pt")
+                    best_pt = os.path.join(self.models_dir, run_name, "weights", "best.pt")
                     trained_fp = model_footprint(model, best_pt, self.image_size)
 
                     row = {
@@ -532,11 +544,12 @@ class NoiseExperimentCOCO:
         for size in self.sizes:
             for model_noise in self.noise_levels:
                 run_name = f"yolo26{size}_noise_{model_noise}"
-                best_pt = os.path.join(self.output_dir, "models", run_name, "weights", "best.pt")
+                best_pt = os.path.join(self.models_dir, run_name, "weights", "best.pt")
                 if not os.path.exists(best_pt):
                     logging.warning(f"missing weights for {run_name}, skipping.")
                     continue
-                for val_noise in self.noise_levels:
+                model = YOLO(best_pt)   # load once, evaluate across all validation noise levels
+                for val_noise in self.val_noise_levels:
                     if self._already_done(self.eval_csv, ["model", "model_noise", "val_noise"],
                                           [f"yolo26{size}", model_noise, val_noise]):
                         continue
@@ -546,19 +559,20 @@ class NoiseExperimentCOCO:
                         val_data = self.data
                         NOISE.configure(val_noise, seed=self.seed + val_noise, device=self.device)
                     try:
-                        model = YOLO(best_pt)
                         with MemoryMonitor(self.device, self.args.mem_interval) as mem:
                             res = model.val(data=val_data,
                                             device=0 if self.device.type == "cuda" else "cpu",
                                             name=f"{run_name}_val_{val_noise}",
-                                            project=os.path.join(self.output_dir, "runs"),
+                                            project=os.path.join(os.path.abspath(self.output_dir), "runs"),
                                             exist_ok=True, verbose=False)
                         m = self._extract_metrics(res)
                         speed = getattr(res, "speed", {}) or {}
                         self._append_row(self.eval_csv, {
                             "model": f"yolo26{size}", "size": size,
                             "model_noise": model_noise, "val_noise": val_noise, **m,
+                            "preprocess_ms_per_img": round(speed.get("preprocess", float("nan")), 3),
                             "inference_ms_per_img": round(speed.get("inference", float("nan")), 3),
+                            "postprocess_ms_per_img": round(speed.get("postprocess", float("nan")), 3),
                             "peak_gpu_alloc_gb": mem.stats["peak_gpu_alloc_gb"],
                             "peak_cpu_rss_gb": mem.stats["peak_cpu_rss_gb"],
                         }, self.EVAL_FIELDS)
@@ -588,7 +602,9 @@ class NoiseExperimentCOCO:
     def run(self):
         start = datetime.now()
         logging.info(f"Noise x YOLO26 x COCO experiment start: sizes={self.sizes}, "
-                     f"noise={self.noise_levels}, data={self.data}, epochs={self.epochs}")
+                     f"train_noise={self.noise_levels}, val_noise={self.val_noise_levels}, "
+                     f"data={self.data}, epochs={self.epochs}, eval_only={self.eval_only}, "
+                     f"cross_eval={self.cross_eval}")
         _redirect_datasets_dir(self.data_root)   # keep all downloads inside the repo
         if self.prepare_data or self.use_noisy_data:
             self.prepare_datasets()
@@ -597,8 +613,9 @@ class NoiseExperimentCOCO:
             return
         if not self.use_noisy_data:
             install_noise_hooks()   # on-the-fly noise (default)
-        self.train_all()
-        if self.cross_eval:
+        if not self.eval_only:
+            self.train_all()
+        if self.cross_eval or self.eval_only:
             self.cross_evaluate()
         logging.info(f"Experiment complete in {datetime.now() - start}. "
                      f"Footprint -> {self.footprint_csv}")
@@ -635,13 +652,27 @@ def parse_args():
     p.add_argument("--max-noise", type=int, default=95)
     p.add_argument("--noise-step", type=int, default=5)
     p.add_argument("--noise-list", type=int, nargs="+", default=None,
-                   help="Explicit noise levels (overrides min/max/step), e.g. --noise-list 0 25 50 75 95")
+                   help="Explicit TRAINING noise levels (overrides min/max/step), e.g. --noise-list 0 25 50 75 95")
+    p.add_argument("--val-min-noise", type=int, default=None,
+                   help="Validation-sweep min noise (default: same as the training range).")
+    p.add_argument("--val-max-noise", type=int, default=None,
+                   help="Validation-sweep max noise (default: same as the training range).")
+    p.add_argument("--val-noise-step", type=int, default=None,
+                   help="Validation-sweep step (default: same as the training range).")
+    p.add_argument("--val-noise-list", type=int, nargs="+", default=None,
+                   help="Explicit VALIDATION noise levels (overrides val min/max/step).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="auto", help="'auto', 'cpu', or a CUDA index like '0'")
     p.add_argument("--output-dir", type=str, default="noise_experiment_coco")
     p.add_argument("--cross-eval", action="store_true",
-                   help="After training, validate every model against every noise level "
-                        "(sizes x N x N -- very expensive on full COCO).")
+                   help="After training, validate every trained model across the full validation "
+                        "noise sweep (sizes x train_levels x val_levels).")
+    p.add_argument("--eval-only", action="store_true",
+                   help="Skip training; run only the cross-noise validation matrix on already-trained "
+                        "weights (implies --cross-eval).")
+    p.add_argument("--models-dir", type=str, default=None,
+                   help="Directory holding the trained runs (<name>_noise_<level>/weights/best.pt). "
+                        "Defaults to <output-dir>/models. Point this at existing weights for --eval-only.")
     p.add_argument("--mem-interval", type=float, default=0.5, help="RSS sampling interval (s)")
     p.add_argument("--smoke", action="store_true",
                    help="Smoke test: coco8.yaml, 1 epoch, imgsz 320, noise levels 0/50/95, model n only.")

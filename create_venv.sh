@@ -14,9 +14,9 @@ fi
 uv venv --python 3.11
 source .venv/Scripts/activate     # Windows; on Linux/mac use: source .venv/bin/activate
 
-# 1) Install the CUDA 12.6 build of PyTorch FIRST, so the next step does not pull
+# 1) Install the CUDA 13.2 build of PyTorch FIRST, so the next step does not pull
 #    the CPU-only default wheel that ultralytics would otherwise resolve.
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
 
 # 2) Install the rest of the dependencies.
 uv pip install -r requirements.txt
