@@ -17,6 +17,9 @@
 # Env toggles:
 #   DATASET=coco128        which dataset (default coco128)
 #   NOISY=1                train/eval on the pre-built on-disk noisy datasets
+#   BATCH=128              training batch size (default 16). Very large values can exceed
+#                          24 GB on the bigger scales; use BATCH=-1 for auto-batch.
+#   WORKERS=16             dataloader workers (default 8)
 #   OUTPUT_DIR=dir         output directory (default per mode)
 #   MODELS_DIR=dir         where trained weights live (…/<name>_noise_<level>/weights/best.pt);
 #                          set this for `eval` if the weights are not under <OUTPUT_DIR>/models
@@ -40,26 +43,28 @@ case "$MODE" in
   coco8)
     "$PY" noise_experiment.py --dataset coco8 --models n s m l x \
         --min-noise 0 --max-noise 95 --noise-step 5 \
-        --epochs 100 --batch-size 16 --image-size 640 $EXTRA \
+        --val-min-noise 0 --val-max-noise 95 --val-noise-step 5 --cross-eval \
+        --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 $EXTRA \
         --output-dir "${OUTPUT_DIR:-noise_experiment_coco8}" ;;
   coco128)
     "$PY" noise_experiment.py --dataset coco128 --models n s m l x \
         --min-noise 0 --max-noise 95 --noise-step 5 \
-        --epochs 100 --batch-size 16 --image-size 640 $EXTRA \
+        --val-min-noise 0 --val-max-noise 95 --val-noise-step 5 --cross-eval \
+        --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 $EXTRA \
         --output-dir "${OUTPUT_DIR:-noise_experiment_coco128}" ;;
   reduced)
     "$PY" noise_experiment.py --dataset coco --models n s m l x --noise-list 0 25 50 75 95 \
-        --epochs 100 --batch-size 16 --image-size 640 $EXTRA \
+        --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 $EXTRA \
         --output-dir "${OUTPUT_DIR:-noise_experiment_coco}" ;;
   full)
     "$PY" noise_experiment.py --dataset coco --models n s m l x \
         --min-noise 0 --max-noise 95 --noise-step 5 \
-        --epochs 100 --batch-size 16 --image-size 640 $EXTRA \
+        --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 $EXTRA \
         --output-dir "${OUTPUT_DIR:-noise_experiment_coco}" ;;
   full-xeval)
     "$PY" noise_experiment.py --dataset coco --models n s m l x \
         --min-noise 0 --max-noise 95 --noise-step 5 \
-        --epochs 100 --batch-size 16 --image-size 640 --cross-eval $EXTRA \
+        --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 --cross-eval $EXTRA \
         --output-dir "${OUTPUT_DIR:-noise_experiment_coco}" ;;
   eval)
     "$PY" noise_experiment.py --dataset "$DATASET" --models n s m l x --eval-only --cross-eval \

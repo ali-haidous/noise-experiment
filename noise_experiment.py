@@ -644,7 +644,7 @@ def parse_args():
     p.add_argument("--models", nargs="+", default=YOLO26_SIZES, choices=YOLO26_SIZES,
                    help="YOLO26 scales to run (default: all five).")
     p.add_argument("--image-size", type=int, default=640)
-    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--patience", type=int, default=50)
