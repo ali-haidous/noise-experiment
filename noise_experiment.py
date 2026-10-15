@@ -9,9 +9,12 @@ memory footprint for every run.
 
 Design notes:
 
-1.  Dataset = COCO (``coco.yaml``). Ultralytics auto-downloads train2017 /
-    val2017 (~20 GB) on first use if the dataset is not already present, which
-    satisfies "download the dataset if it doesn't exist".
+1.  Dataset = COCO 2017. The labels plus train2017 / val2017 images (~20 GB) are
+    downloaded once into ``<data-root>/coco`` if not already present (test2017 is
+    skipped). ``--num-images N`` trains on just the first N train2017 images (and
+    validates on the first N val2017 images, see ``--val-images``), built as a small
+    self-contained dataset at ``<data-root>/coco_first<N>``. This replaces coco128,
+    which is simply the first 128 images of train2017.
 
 2.  Noise is injected ON-THE-FLY at the network input rather than by writing 20
     physical noisy copies of every image to disk. Twenty noisy copies of COCO's
@@ -309,6 +312,107 @@ def _rel_under_images(img_path):
 
 
 # ----------------------------------------------------------------------------
+# Full COCO download + first-N subsets
+# ----------------------------------------------------------------------------
+COCO_TRAIN_IMAGES = 118287   # images in COCO train2017
+COCO_VAL_IMAGES = 5000       # images in COCO val2017
+COCO_IMAGE_URL = "http://images.cocodataset.org/zips/{split}.zip"
+
+
+def coco_subset_name(num_images, val_images):
+    """Folder/yaml name of a first-N subset, e.g. coco_first512 or coco_first512_val5000."""
+    name = f"coco_first{num_images}"
+    return name if val_images == num_images else f"{name}_val{val_images}"
+
+
+def _dir_has_files(path):
+    path = Path(path)
+    return path.is_dir() and any(path.iterdir())
+
+
+def ensure_full_coco(datasets_dir):
+    """Download COCO 2017 into <datasets_dir>/coco if it isn't there yet and return that dir.
+
+    Same layout and sources as Ultralytics' own coco.yaml download (so `--dataset coco`
+    reuses it), but only fetches what is missing, skips the 7 GB test2017 split, and
+    deletes each zip once it is extracted."""
+    from ultralytics.utils import ASSETS_URL
+    from ultralytics.utils.downloads import download
+
+    coco = Path(datasets_dir).resolve() / "coco"
+    if not all((coco / f"{s}.txt").is_file() for s in ("train2017", "val2017")):
+        logging.info(f"Downloading COCO 2017 labels -> {coco}")
+        download(f"{ASSETS_URL}/coco2017labels-segments.zip", dir=coco.parent,
+                 delete=True, exist_ok=True)
+    missing = [s for s in ("train2017", "val2017") if not _dir_has_files(coco / "images" / s)]
+    if missing:
+        logging.info(f"Downloading COCO 2017 images {missing} (~19 GB train, ~1 GB val) "
+                     f"-> {coco / 'images'}. This happens once.")
+        download([COCO_IMAGE_URL.format(split=s) for s in missing], dir=coco / "images",
+                 delete=True, threads=len(missing))
+    logging.info(f"Full COCO 2017 available at {coco}")
+    return coco
+
+
+def _link_or_copy(src, dst):
+    """Hard-link `src` to `dst` (no extra disk space); copy if linking isn't possible."""
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        dst.unlink()
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copyfile(src, dst)
+
+
+def build_coco_subset(coco_dir, out_yaml, num_images, val_images):
+    """Build a YOLO dataset from the first `num_images` train2017 images and the first
+    `val_images` val2017 images, sorted by file name (the ordering coco128 uses).
+
+    Images are hard-linked and labels copied into the subset folder, so it is
+    self-contained: its label cache lives next to it and never clobbers the full-COCO
+    cache, and the on-disk noisy pipeline can treat it like any other dataset."""
+    import yaml
+    from ultralytics.data.utils import img2label_paths
+    from ultralytics.utils import YAML
+    from ultralytics.utils.checks import check_yaml
+
+    coco_dir, out_yaml = Path(coco_dir), Path(out_yaml)
+    sub_dir = out_yaml.parent
+    logging.info(f"Building COCO subset: first {num_images} train2017 + first {val_images} "
+                 f"val2017 images -> {sub_dir}")
+    for split, coco_split, n in (("train", "train2017", num_images), ("val", "val2017", val_images)):
+        lines = (coco_dir / f"{coco_split}.txt").read_text().splitlines()
+        imgs = sorted(os.path.normpath(coco_dir / ln.strip()) for ln in lines if ln.strip())
+        if len(imgs) < n:
+            raise ValueError(f"COCO {coco_split} lists {len(imgs)} images, asked for {n}.")
+        imgs = imgs[:n]
+        listing = []
+        for img, lbl in zip(imgs, img2label_paths(imgs)):
+            if not os.path.isfile(img):
+                raise FileNotFoundError(
+                    f"{img} is missing, so the COCO download looks incomplete. Delete "
+                    f"{Path(img).parent} and rerun to download {coco_split} again.")
+            rel = _rel_under_images(img)
+            dst_img = sub_dir / "images" / rel
+            _link_or_copy(img, dst_img)
+            if os.path.isfile(lbl):   # images without objects have no label file
+                dst_lbl = (sub_dir / "labels" / rel).with_suffix(".txt")
+                dst_lbl.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(lbl, dst_lbl)
+            listing.append(str(dst_img.resolve()))
+        (sub_dir / f"{split}.txt").write_text("\n".join(listing))
+
+    names = YAML.load(check_yaml("coco.yaml"))["names"]
+    with open(out_yaml, "w") as fh:   # written last: its presence marks a finished build
+        yaml.safe_dump({"path": str(sub_dir.resolve()), "train": "train.txt", "val": "val.txt",
+                        "names": names}, fh, sort_keys=False)
+    logging.info(f"COCO subset ready: {out_yaml}")
+    return str(out_yaml)
+
+
+# ----------------------------------------------------------------------------
 # Experiment driver
 # ----------------------------------------------------------------------------
 class NoiseExperimentCOCO:
@@ -339,6 +443,8 @@ class NoiseExperimentCOCO:
         self.cross_eval = args.cross_eval
         self.data_root = os.path.abspath(args.data_root)
         self.dataset_name = Path(self.data).stem
+        self.num_images = args.num_images
+        self.val_images = args.val_images
         self.use_noisy_data = args.use_noisy_data
         self.prepare_data = args.prepare_data
         self.force_regenerate = args.force_regenerate
@@ -443,7 +549,7 @@ class NoiseExperimentCOCO:
         logging.info(f"Datasets directory -> {root}")
         if self.dataset_name == "coco" and len(self.noise_levels) > 2:
             logging.warning(f"Building {len(self.noise_levels)} noisy copies of full COCO "
-                            f"(~118k images each) needs a lot of disk; consider coco128/coco8.")
+                            f"(~118k images each) needs a lot of disk; consider --num-images or coco8.")
         logging.info(f"Resolving/downloading clean dataset '{self.data}' ...")
         data = check_det_dataset(self.data)
         names, droot = data.get("names"), data.get("path")
@@ -476,6 +582,18 @@ class NoiseExperimentCOCO:
                 yaml.safe_dump({"path": os.path.abspath(lvl_dir), "train": "train.txt",
                                 "val": "val.txt", "names": names}, fh, sort_keys=False)
         logging.info(f"Noisy datasets ready under {self._noisy_root()}")
+
+    def resolve_dataset(self):
+        """Make sure the clean dataset exists before anything uses it. Full COCO and
+        first-N subsets are downloaded/built here; coco8 is left to Ultralytics."""
+        if self.num_images:
+            if os.path.isfile(self.data) and not self.force_regenerate:
+                logging.info(f"Using existing COCO subset {self.data}")
+                return
+            coco_dir = ensure_full_coco(self.data_root)
+            build_coco_subset(coco_dir, self.data, self.num_images, self.val_images)
+        elif self.data == "coco.yaml":
+            ensure_full_coco(self.data_root)
 
     def train_all(self):
         from ultralytics import YOLO
@@ -606,6 +724,7 @@ class NoiseExperimentCOCO:
                      f"data={self.data}, epochs={self.epochs}, eval_only={self.eval_only}, "
                      f"cross_eval={self.cross_eval}")
         _redirect_datasets_dir(self.data_root)   # keep all downloads inside the repo
+        self.resolve_dataset()
         if self.prepare_data or self.use_noisy_data:
             self.prepare_datasets()
         if self.prepare_data:
@@ -623,13 +742,20 @@ class NoiseExperimentCOCO:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Noise robustness across YOLO26 sizes on COCO")
-    p.add_argument("--dataset", choices=["coco", "coco8", "coco128"], default="coco",
+    p.add_argument("--dataset", choices=["coco", "coco8"], default="coco",
                    help="Which dataset to train on, auto-downloaded if missing: "
-                        "coco = full train2017/val2017 (~20 GB), "
-                        "coco128 = 128-image subset, coco8 = 8-image subset.")
+                        "coco = full train2017/val2017 (~20 GB, or a first-N slice of it with "
+                        "--num-images), coco8 = 8-image smoke-test set.")
+    p.add_argument("--num-images", type=int, default=None, metavar="N",
+                   help="Use only the first N images of COCO train2017 (e.g. 512, 1024, 2048). "
+                        "Full COCO is downloaded once into --data-root, then a subset dataset is "
+                        "built at <data-root>/coco_first<N>/ and reused on later runs.")
+    p.add_argument("--val-images", type=int, default=None, metavar="M",
+                   help="With --num-images: validate on the first M images of COCO val2017 "
+                        f"(1-{COCO_VAL_IMAGES}). Default: same as N, capped at {COCO_VAL_IMAGES}.")
     p.add_argument("--data", type=str, default=None,
                    help="Raw Ultralytics dataset yaml override. If omitted it is "
-                        "derived from --dataset (e.g. coco128 -> coco128.yaml).")
+                        "derived from --dataset (e.g. coco8 -> coco8.yaml).")
     p.add_argument("--data-root", type=str, default="datasets",
                    help="Directory at the repo root holding BOTH the downloaded dataset and "
                         "the on-disk noisy copies.")
@@ -640,7 +766,8 @@ def parse_args():
                    help="Train/evaluate on the pre-built on-disk noisy datasets instead of "
                         "injecting noise on the fly (auto-builds them first if missing).")
     p.add_argument("--force-regenerate", action="store_true",
-                   help="Rebuild on-disk noisy datasets even if they already exist.")
+                   help="Rebuild the --num-images subset and on-disk noisy datasets even if they "
+                        "already exist.")
     p.add_argument("--models", nargs="+", default=YOLO26_SIZES, choices=YOLO26_SIZES,
                    help="YOLO26 scales to run (default: all five).")
     p.add_argument("--image-size", type=int, default=640)
@@ -677,6 +804,24 @@ def parse_args():
     p.add_argument("--smoke", action="store_true",
                    help="Smoke test: coco8.yaml, 1 epoch, imgsz 320, noise levels 0/50/95, model n only.")
     args = p.parse_args()
+
+    if args.num_images is not None:
+        if args.smoke:
+            p.error("--num-images can't be combined with --smoke (the smoke test uses coco8)")
+        if args.data is not None:
+            p.error("--num-images builds its own dataset yaml; drop --data")
+        if args.dataset != "coco":
+            p.error("--num-images only works with --dataset coco")
+        if not 1 <= args.num_images <= COCO_TRAIN_IMAGES:
+            p.error(f"--num-images must be between 1 and {COCO_TRAIN_IMAGES}")
+        if args.val_images is None:
+            args.val_images = min(args.num_images, COCO_VAL_IMAGES)
+        elif not 1 <= args.val_images <= COCO_VAL_IMAGES:
+            p.error(f"--val-images must be between 1 and {COCO_VAL_IMAGES}")
+        name = coco_subset_name(args.num_images, args.val_images)
+        args.data = os.path.join(os.path.abspath(args.data_root), name, f"{name}.yaml")
+    elif args.val_images is not None:
+        p.error("--val-images only applies together with --num-images")
 
     if args.smoke:
         args.dataset = "coco8"

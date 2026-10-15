@@ -4,7 +4,7 @@
 #   ./run.sh smoke      # coco8, 1 epoch, model n, noise 0/50/95        (minutes)
 #   ./run.sh prepare    # download chosen dataset + build on-disk noisy copies, then exit
 #   ./run.sh coco8      # coco8   (8 imgs),  5 sizes, all 20 noise levels
-#   ./run.sh coco128    # coco128 (128 imgs), 5 sizes, all 20 noise levels
+#   ./run.sh subset     # first NUM_IMAGES of full COCO (default 512), 5 sizes, all 20 noise levels
 #   ./run.sh reduced    # full COCO, 5 sizes, noise 0/25/50/75/95
 #   ./run.sh full       # full COCO, 5 sizes, all 20 noise levels (0-95 step 5)
 #   ./run.sh full-xeval # full sweep + the cross-noise validation matrix
@@ -15,7 +15,11 @@
 # the whole validation noise sweep, i.e. sizes x train_levels x val_levels runs.
 #
 # Env toggles:
-#   DATASET=coco128        which dataset (default coco128)
+#   NUM_IMAGES=1024        subset size: the first N images of COCO train2017 (default 512).
+#                          Full COCO is downloaded once; each N gets its own small dataset.
+#   VAL_IMAGES=5000        subset validation size: first M images of val2017
+#                          (default = NUM_IMAGES, max 5000)
+#   DATASET=coco8          dataset for prepare/eval: subset (default, uses NUM_IMAGES), coco or coco8
 #   NOISY=1                train/eval on the pre-built on-disk noisy datasets
 #   BATCH=128              training batch size (default 16). Very large values can exceed
 #                          24 GB on the bigger scales; use BATCH=-1 for auto-batch.
@@ -30,15 +34,24 @@
 set -e
 MODE="${1:-smoke}"
 PY="${PYTHON:-python}"
-DATASET="${DATASET:-coco128}"
+DATASET="${DATASET:-subset}"
+NUM_IMAGES="${NUM_IMAGES:-512}"
 EXTRA=""
 [ "${NOISY:-0}" = "1" ] && EXTRA="--use-noisy-data"
+
+SUBSET_ARGS="--dataset coco --num-images $NUM_IMAGES ${VAL_IMAGES:+--val-images $VAL_IMAGES}"
+SUBSET_OUT="noise_experiment_coco_first${NUM_IMAGES}${VAL_IMAGES:+_val$VAL_IMAGES}"
+if [ "$DATASET" = "subset" ]; then
+  DATA_ARGS="$SUBSET_ARGS"; DATA_OUT="$SUBSET_OUT"
+else
+  DATA_ARGS="--dataset $DATASET"; DATA_OUT="noise_experiment_$DATASET"
+fi
 
 case "$MODE" in
   smoke)
     "$PY" noise_experiment.py --smoke $EXTRA --output-dir "${OUTPUT_DIR:-noise_experiment_coco_smoke}" ;;
   prepare)
-    "$PY" noise_experiment.py --dataset "$DATASET" --prepare-data \
+    "$PY" noise_experiment.py $DATA_ARGS --prepare-data \
         --min-noise 0 --max-noise 95 --noise-step 5 --data-root datasets ;;
   coco8)
     "$PY" noise_experiment.py --dataset coco8 --models n s m l x \
@@ -46,12 +59,12 @@ case "$MODE" in
         --val-min-noise 0 --val-max-noise 95 --val-noise-step 5 --cross-eval \
         --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 $EXTRA \
         --output-dir "${OUTPUT_DIR:-noise_experiment_coco8}" ;;
-  coco128)
-    "$PY" noise_experiment.py --dataset coco128 --models n s m l x \
+  subset)
+    "$PY" noise_experiment.py $SUBSET_ARGS --models n s m l x \
         --min-noise 0 --max-noise 95 --noise-step 5 \
         --val-min-noise 0 --val-max-noise 95 --val-noise-step 5 --cross-eval \
         --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 $EXTRA \
-        --output-dir "${OUTPUT_DIR:-noise_experiment_coco128}" ;;
+        --output-dir "${OUTPUT_DIR:-$SUBSET_OUT}" ;;
   reduced)
     "$PY" noise_experiment.py --dataset coco --models n s m l x --noise-list 0 25 50 75 95 \
         --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 $EXTRA \
@@ -67,11 +80,11 @@ case "$MODE" in
         --epochs 100 --batch-size ${BATCH:-16} --workers ${WORKERS:-8} --image-size 640 --cross-eval $EXTRA \
         --output-dir "${OUTPUT_DIR:-noise_experiment_coco}" ;;
   eval)
-    "$PY" noise_experiment.py --dataset "$DATASET" --models n s m l x --eval-only --cross-eval \
+    "$PY" noise_experiment.py $DATA_ARGS --models n s m l x --eval-only --cross-eval \
         --min-noise "${TRAIN_MIN:-0}" --max-noise "${TRAIN_MAX:-95}" --noise-step "${TRAIN_STEP:-5}" \
         --val-min-noise "${VAL_MIN:-0}" --val-max-noise "${VAL_MAX:-95}" --val-noise-step "${VAL_STEP:-5}" \
         --image-size 640 ${MODELS_DIR:+--models-dir "$MODELS_DIR"} $EXTRA \
-        --output-dir "${OUTPUT_DIR:-noise_experiment_coco128}" ;;
+        --output-dir "${OUTPUT_DIR:-$DATA_OUT}" ;;
   *)
-    echo "unknown mode: $MODE (use smoke|prepare|coco8|coco128|reduced|full|full-xeval|eval)"; exit 1 ;;
+    echo "unknown mode: $MODE (use smoke|prepare|coco8|subset|reduced|full|full-xeval|eval)"; exit 1 ;;
 esac
